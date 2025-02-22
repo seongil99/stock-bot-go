@@ -8,9 +8,9 @@ services:
       - MONGO_URI=mongodb://root:example@mongo:27017
       - LINE_CHANNEL_ACCESS_TOKEN="n2gzEoZplOkahFxEXI1vS7i2+k8NF2nuDtFVyrW/4RaFiGJVrAI50Hh8QWHQiJ190jxw1iVVH5+vfH6V7QT70alo+ADxa0nF+flVC1EUofYl7pr+lzF+kkH5pUSD2DN+f4HUZqxPRQl+d678frR8DwdB04t89/1O/w1cDnyilFU="
 
-  mongo:
-    image: mongo:8.0.4
-    restart: always
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: example
+  # mongo:
+  #   image: mongo:8.0.4
+  #   restart: always
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: root
+  #     MONGO_INITDB_ROOT_PASSWORD: example

@@ -269,20 +269,27 @@ func process() {
 }
 
 func main() {
+	log.Printf("Starting stock price checker")
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
+	log.Printf("Loaded environment variables")
+
 	loc, err := time.LoadLocation("Asia/Seoul")
 	if err != nil {
 		log.Fatal("Error loading location")
 	}
+	log.Printf("Loaded location")
 
 	for {
+		log.Printf("Checking time")
 		now := time.Now().In(loc)
 		if now.Hour() == 6 {
+			log.Printf("Processing")
 			process()
 		}
+		log.Printf("Sleeping")
 		time.Sleep(time.Hour)
 	}
 }
