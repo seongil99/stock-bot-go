@@ -4,13 +4,19 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: always
-    environment:
-      - MONGO_URI=mongodb://root:example@mongo:27017
-      - LINE_CHANNEL_ACCESS_TOKEN="n2gzEoZplOkahFxEXI1vS7i2+k8NF2nuDtFVyrW/4RaFiGJVrAI50Hh8QWHQiJ190jxw1iVVH5+vfH6V7QT70alo+ADxa0nF+flVC1EUofYl7pr+lzF+kkH5pUSD2DN+f4HUZqxPRQl+d678frR8DwdB04t89/1O/w1cDnyilFU="
+    depends_on:
+      mongo:
+        condition: service_healthy
 
-  # mongo:
-  #   image: mongo:8.0.4
-  #   restart: always
-  #   environment:
-  #     MONGO_INITDB_ROOT_USERNAME: root
-  #     MONGO_INITDB_ROOT_PASSWORD: example
+  mongo:
+    image: mongo:8.0.4
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: $MONGO_INITDB_ROOT_USERNAME
+      MONGO_INITDB_ROOT_PASSWORD: $MONGO_INITDB_ROOT_PASSWORD
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet", "--username", "$MONGO_INITDB_ROOT_USERNAME", "--password", "$MONGO_INITDB_ROOT_PASSWORD", "--authenticationDatabase", "admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
