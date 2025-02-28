@@ -74,6 +74,6 @@ func DefaultConfig() Config {
 		MaxConcurrency:      5,
 		PriceAlertThreshold: 5.0,
 		TimeZone:            "Asia/Seoul",
-		CheckHour:           6,
+		CheckHour:           7,
 	}
 }
