@@ -40,6 +40,10 @@ func NewPriceFetcher() *PriceFetcher {
 		chromedp.Flag("disable-dev-shm-usage", true), // Improves stability in container environments
 		chromedp.Flag("disable-setuid-sandbox", true),
 		chromedp.Flag("no-zygote", true),
+		chromedp.UserAgent("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36"),
+		chromedp.Flag("ignore-certificate-errors", true),
+		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
+		chromedp.Flag("disable-web-security", true),
 	)
 	return &PriceFetcher{
 		Opts:          opts,
