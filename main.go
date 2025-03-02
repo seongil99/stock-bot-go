@@ -1,13 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"stock-bot/models"
@@ -47,6 +50,10 @@ var alertMapMutex sync.RWMutex
 func main() {
 	log.Printf("Starting %s v%s", appName, version)
 
+	// 종료 시그널 처리
+	ctx, cancel := context.WithCancel(context.Background())
+	setupSignalHandler(cancel)
+
 	// Load environment variables
 	config, err := loadConfig()
 	if err != nil {
@@ -72,7 +79,22 @@ func main() {
 	}
 
 	// Start scheduler
-	runScheduler(db, messenger, config)
+	runScheduler(ctx, db, messenger, config)
+}
+
+// 시그널 핸들러 함수 추가
+func setupSignalHandler(cancel context.CancelFunc) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		log.Println("Received termination signal")
+		cancel()
+		// 정상적으로 종료될 때까지 잠시 대기
+		time.Sleep(2 * time.Second)
+		log.Println("Gracefully shutting down")
+		os.Exit(0)
+	}()
 }
 
 // loadConfig loads application settings from environment variables
@@ -138,7 +160,7 @@ func initializeMessenger(config models.Config) (services.Messenger, error) {
 }
 
 // runScheduler executes the scheduling logic
-func runScheduler(db *services.Database, messenger services.Messenger, config models.Config) {
+func runScheduler(ctx context.Context, db *services.Database, messenger services.Messenger, config models.Config) {
 	// Set timezone
 	loc, err := time.LoadLocation(config.TimeZone)
 	if err != nil {
@@ -156,16 +178,22 @@ func runScheduler(db *services.Database, messenger services.Messenger, config mo
 	defer ticker.Stop()
 
 	// Check current time at initial run
-	checkAndProcess(db, messenger, config, loc)
+	checkAndProcess(ctx, db, messenger, config, loc)
 
 	// Periodic execution
-	for range ticker.C {
-		checkAndProcess(db, messenger, config, loc)
+	for {
+		select {
+		case <-ticker.C:
+			checkAndProcess(ctx, db, messenger, config, loc)
+		case <-ctx.Done():
+			log.Println("Scheduler stopped")
+			return
+		}
 	}
 }
 
 // checkAndProcess checks the current time and runs the price collection process if needed
-func checkAndProcess(db *services.Database, messenger services.Messenger, config models.Config, loc *time.Location) {
+func checkAndProcess(ctx context.Context, db *services.Database, messenger services.Messenger, config models.Config, loc *time.Location) {
 	now := time.Now().In(loc)
 	currentDate := now.Format("2006-01-02")
 
@@ -174,7 +202,7 @@ func checkAndProcess(db *services.Database, messenger services.Messenger, config
 	// 1. Run daily report at specified time (7AM) if not already run today
 	if now.Hour() == config.CheckHour && now.Minute() < checkInterval && lastProcessedDate != currentDate {
 		log.Printf("Starting daily price report at scheduled time")
-		sendDailyReport(db, messenger, config)
+		sendDailyReport(ctx, db, messenger, config)
 
 		// Record today's date
 		lastProcessedDate = currentDate
@@ -193,7 +221,7 @@ func checkAndProcess(db *services.Database, messenger services.Messenger, config
 	// Check at specified realtime intervals
 	if now.Minute()%realtimeCheckMinutes == 0 {
 		log.Printf("Checking for realtime price changes")
-		checkRealtimePriceChanges(db, messenger, config)
+		checkRealtimePriceChanges(ctx, db, messenger, config)
 	}
 }
 
@@ -245,11 +273,11 @@ func markAlertSent(symbol string) {
 }
 
 // sendDailyReport sends a daily price report for all stocks
-func sendDailyReport(db *services.Database, messenger services.Messenger, config models.Config) {
+func sendDailyReport(ctx context.Context, db *services.Database, messenger services.Messenger, config models.Config) {
 	log.Printf("Fetching stock prices for daily report")
 
 	// Fetch prices
-	prices, err := fetchAllPrices(config)
+	prices, err := fetchAllPrices(ctx, config)
 	if err != nil {
 		log.Printf("Error during price fetching for daily report: %v", err)
 		return
@@ -264,9 +292,9 @@ func sendDailyReport(db *services.Database, messenger services.Messenger, config
 }
 
 // checkRealtimePriceChanges checks for significant price changes in real-time and sends alerts
-func checkRealtimePriceChanges(db *services.Database, messenger services.Messenger, config models.Config) {
+func checkRealtimePriceChanges(ctx context.Context, db *services.Database, messenger services.Messenger, config models.Config) {
 	// Fetch prices
-	prices, err := fetchAllPrices(config)
+	prices, err := fetchAllPrices(ctx, config)
 	if err != nil {
 		log.Printf("Error during price fetching for realtime check: %v", err)
 		return
@@ -308,11 +336,11 @@ func checkRealtimePriceChanges(db *services.Database, messenger services.Messeng
 }
 
 // fetchAllPrices fetches prices for all stocks
-func fetchAllPrices(config models.Config) (map[string]string, error) {
+func fetchAllPrices(ctx context.Context, config models.Config) (map[string]string, error) {
 	priceFetcher := services.NewPriceFetcher()
 
 	// Fetch price information
-	priceResults, err := priceFetcher.FetchPriceConcurrent(models.Tickers, maxConcurrency)
+	priceResults, err := priceFetcher.FetchPriceConcurrent(ctx, models.Tickers, maxConcurrency)
 	if err != nil {
 		return nil, fmt.Errorf("error during price fetching: %w", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"stock-bot/models"
@@ -44,6 +45,8 @@ func NewPriceFetcher() *PriceFetcher {
 		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
 		chromedp.Flag("disable-web-security", true),
+		chromedp.Flag("single-process", true),
+		chromedp.Flag("no-default-browser-check", true),
 	)
 	return &PriceFetcher{
 		Opts:          opts,
@@ -68,13 +71,15 @@ func (pf *PriceFetcher) FetchPrice(ctx context.Context, url string) (string, err
 
 		// Use timeout context
 		timeoutCtx, cancel := context.WithTimeout(ctx, pf.FetchTimeout)
-		defer cancel()
 
-		err = chromedp.Run(timeoutCtx,
-			chromedp.Navigate(url),
-			chromedp.WaitVisible(`span[data-testid="qsp-price"]`, chromedp.ByQuery),
-			chromedp.Text(`span[data-testid="qsp-price"]`, &price, chromedp.ByQuery),
-		)
+		err = func() error {
+			defer cancel()
+			return chromedp.Run(timeoutCtx,
+				chromedp.Navigate(url),
+				chromedp.WaitVisible(`span[data-testid="qsp-price"]`, chromedp.ByQuery),
+				chromedp.Text(`span[data-testid="qsp-price"]`, &price, chromedp.ByQuery),
+			)
+		}()
 
 		// Return immediately on success
 		if err == nil {
@@ -105,9 +110,9 @@ func (pf *PriceFetcher) FetchPrice(ctx context.Context, url string) (string, err
 }
 
 // FetchPriceConcurrent fetches prices for multiple stocks concurrently
-func (pf *PriceFetcher) FetchPriceConcurrent(tickers []string, maxConcurrency int) (map[string]models.PriceResult, error) {
+func (pf *PriceFetcher) FetchPriceConcurrent(ctx context.Context, tickers []string, maxConcurrency int) (map[string]models.PriceResult, error) {
 	// Setup base context
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), pf.Opts...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, pf.Opts...)
 	defer allocCancel()
 
 	// Shared parent context
@@ -120,12 +125,18 @@ func (pf *PriceFetcher) FetchPriceConcurrent(tickers []string, maxConcurrency in
 	// Results and error channels
 	results := make(chan models.PriceResult, len(tickers))
 
+	// waitgroup
+	var wg sync.WaitGroup
+
 	// Create URL mapping
 	urls := GetURLs(tickers)
 
 	// Start goroutine for each ticker
 	for _, ticker := range tickers {
+		wg.Add(1)
 		go func(symbol string) {
+			defer wg.Done()
+
 			// Acquire semaphore
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -148,10 +159,14 @@ func (pf *PriceFetcher) FetchPriceConcurrent(tickers []string, maxConcurrency in
 		}(ticker)
 	}
 
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	// Collect all results
 	priceMap := make(map[string]models.PriceResult)
-	for i := 0; i < len(tickers); i++ {
-		result := <-results
+	for result := range results {
 		priceMap[result.Symbol] = result
 	}
 
