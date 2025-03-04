@@ -47,8 +47,14 @@ var lastProcessedDate string
 var lastAlertSentMap = make(map[string]time.Time)
 var alertMapMutex sync.RWMutex
 
+// Global price fetcher instance
+var priceFetcher *services.PriceFetcher
+
 func main() {
 	log.Printf("Starting %s v%s", appName, version)
+
+	// Initialize the price fetcher
+	priceFetcher = services.NewPriceFetcher()
 
 	// 종료 시그널 처리
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,6 +84,8 @@ func main() {
 		log.Fatal("Messenger initialization error: ", err)
 	}
 
+	fetchAllPrices(ctx, config)
+
 	// Start scheduler
 	runScheduler(ctx, db, messenger, config)
 }
@@ -90,6 +98,13 @@ func setupSignalHandler(cancel context.CancelFunc) {
 		<-c
 		log.Println("Received termination signal")
 		cancel()
+
+		// Clean up Chrome browser resources
+		if priceFetcher != nil {
+			log.Println("Cleaning up browser resources")
+			priceFetcher.Cleanup()
+		}
+
 		// 정상적으로 종료될 때까지 잠시 대기
 		time.Sleep(2 * time.Second)
 		log.Println("Gracefully shutting down")
@@ -337,8 +352,6 @@ func checkRealtimePriceChanges(ctx context.Context, db *services.Database, messe
 
 // fetchAllPrices fetches prices for all stocks
 func fetchAllPrices(ctx context.Context, config models.Config) (map[string]string, error) {
-	priceFetcher := services.NewPriceFetcher()
-
 	// Fetch price information
 	priceResults, err := priceFetcher.FetchPriceConcurrent(ctx, models.Tickers, maxConcurrency)
 	if err != nil {

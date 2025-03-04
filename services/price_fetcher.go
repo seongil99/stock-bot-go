@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"stock-bot/models"
@@ -20,6 +23,17 @@ var (
 	ErrBrowserTimeout   = errors.New("browser operation timed out")
 )
 
+// Global allocator and browser context to reuse across requests
+var (
+	globalAllocCtx      context.Context
+	globalAllocCancel   context.CancelFunc
+	globalBrowserCtx    context.Context
+	globalBrowserCancel context.CancelFunc
+	setupOnce           sync.Once
+	cleanupOnce         sync.Once
+	browserMutex        sync.Mutex
+)
+
 // PriceFetcher collects stock price information
 type PriceFetcher struct {
 	Opts          []chromedp.ExecAllocatorOption
@@ -28,8 +42,9 @@ type PriceFetcher struct {
 	RetryInterval time.Duration
 }
 
-// NewPriceFetcher creates a new PriceFetcher instance
-func NewPriceFetcher() *PriceFetcher {
+// setupGlobalBrowser initializes the global browser instance
+func setupGlobalBrowser() {
+	// Create allocator context
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.DisableGPU,
 		chromedp.NoDefaultBrowserCheck,
@@ -38,18 +53,60 @@ func NewPriceFetcher() *PriceFetcher {
 		chromedp.NoSandbox,
 		chromedp.Flag("blink-settings", "scriptEnabled=false, imagesEnabled=false"),
 		chromedp.Flag("disable-extensions", true),
-		chromedp.Flag("disable-dev-shm-usage", true), // Improves stability in container environments
+		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-setuid-sandbox", true),
 		chromedp.Flag("no-zygote", true),
 		chromedp.UserAgent("AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36"),
 		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
 		chromedp.Flag("disable-web-security", true),
-		chromedp.Flag("single-process", true),
 		chromedp.Flag("no-default-browser-check", true),
 	)
+
+	// Create a background context for the allocator
+	globalAllocCtx, globalAllocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
+
+	// Create a browser context
+	globalBrowserCtx, globalBrowserCancel = chromedp.NewContext(
+		globalAllocCtx,
+		chromedp.WithLogf(log.Printf),
+	)
+
+	// Start the browser
+	if err := chromedp.Run(globalBrowserCtx); err != nil {
+		log.Printf("Error starting browser: %v", err)
+	}
+
+	// Set up signal handling for cleanup
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		log.Println("Received termination signal, cleaning up browser")
+		cleanupGlobalBrowser()
+		os.Exit(0)
+	}()
+}
+
+// cleanupGlobalBrowser properly closes the browser to prevent zombie processes
+func cleanupGlobalBrowser() {
+	cleanupOnce.Do(func() {
+		log.Println("Cleaning up global browser")
+		if globalBrowserCancel != nil {
+			globalBrowserCancel()
+		}
+		if globalAllocCancel != nil {
+			globalAllocCancel()
+		}
+	})
+}
+
+// NewPriceFetcher creates a new PriceFetcher instance
+func NewPriceFetcher() *PriceFetcher {
+	// Initialize the global browser if it hasn't been done yet
+	setupOnce.Do(setupGlobalBrowser)
+
 	return &PriceFetcher{
-		Opts:          opts,
 		FetchTimeout:  2 * time.Minute,
 		MaxRetries:    3,
 		RetryInterval: 5 * time.Second,
@@ -69,17 +126,26 @@ func (pf *PriceFetcher) FetchPrice(ctx context.Context, url string) (string, err
 			time.Sleep(pf.RetryInterval)
 		}
 
-		// Use timeout context
-		timeoutCtx, cancel := context.WithTimeout(ctx, pf.FetchTimeout)
+		// Create a new tab context from the global browser context
+		browserMutex.Lock()
+		tabCtx, tabCancel := chromedp.NewContext(globalBrowserCtx)
+		browserMutex.Unlock()
 
-		err = func() error {
-			defer cancel()
-			return chromedp.Run(timeoutCtx,
-				chromedp.Navigate(url),
-				chromedp.WaitVisible(`span[data-testid="qsp-price"]`, chromedp.ByQuery),
-				chromedp.Text(`span[data-testid="qsp-price"]`, &price, chromedp.ByQuery),
-			)
+		// Add timeout to the tab context
+		tabTimeoutCtx, cancel := context.WithTimeout(tabCtx, pf.FetchTimeout)
+
+		// Always cancel the contexts when done with this iteration
+		defer func() {
+			cancel()
+			tabCancel()
 		}()
+
+		// Execute the actions in the tab with timeout
+		err = chromedp.Run(tabTimeoutCtx,
+			chromedp.Navigate(url),
+			chromedp.WaitVisible(`span[data-testid="qsp-price"]`, chromedp.ByQuery),
+			chromedp.Text(`span[data-testid="qsp-price"]`, &price, chromedp.ByQuery),
+		)
 
 		// Return immediately on success
 		if err == nil {
@@ -111,18 +177,10 @@ func (pf *PriceFetcher) FetchPrice(ctx context.Context, url string) (string, err
 
 // FetchPriceConcurrent fetches prices for multiple stocks concurrently
 func (pf *PriceFetcher) FetchPriceConcurrent(ctx context.Context, tickers []string, maxConcurrency int) (map[string]models.PriceResult, error) {
-	// Setup base context
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, pf.Opts...)
-	defer allocCancel()
-
-	// Shared parent context
-	parentCtx, parentCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(log.Printf))
-	defer parentCancel()
-
 	// Semaphore to limit concurrency
 	sem := make(chan struct{}, maxConcurrency)
 
-	// Results and error channels
+	// Results channel
 	results := make(chan models.PriceResult, len(tickers))
 
 	// waitgroup
@@ -143,12 +201,8 @@ func (pf *PriceFetcher) FetchPriceConcurrent(ctx context.Context, tickers []stri
 
 			url := urls[symbol]
 
-			// Create child context
-			childCtx, childCancel := chromedp.NewContext(parentCtx)
-			defer childCancel()
-
-			// Fetch price
-			price, err := pf.FetchPrice(childCtx, url)
+			// Fetch price using the global browser context
+			price, err := pf.FetchPrice(ctx, url)
 
 			// Send results
 			results <- models.PriceResult{
@@ -180,4 +234,9 @@ func GetURLs(tickers []string) map[string]string {
 		urls[t] = fmt.Sprintf("https://finance.yahoo.com/quote/%s/", t)
 	}
 	return urls
+}
+
+// Cleanup should be called when the application is shutting down
+func (pf *PriceFetcher) Cleanup() {
+	cleanupGlobalBrowser()
 }
