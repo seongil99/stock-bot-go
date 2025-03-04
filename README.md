@@ -10,6 +10,8 @@ A real-time stock price monitoring and alerting system that tracks stock prices,
 - **Multiple Messaging Platforms**: Supports both Telegram and Line for notifications
 - **Persistent Storage**: Stores historical price data in MongoDB for trend analysis
 - **Configurable Settings**: Customizable alert thresholds, check intervals, and reporting times
+- **Resource Management**: Properly manages browser resources with graceful shutdown
+- **Initial Price Check**: Performs an initial price check on startup to verify system functionality
 
 ## Technology Stack
 
@@ -40,10 +42,6 @@ LINE_CHANNEL_ACCESS_TOKEN=your_line_channel_access_token
 MONGO_INITDB_ROOT_USERNAME=username
 MONGO_INITDB_ROOT_PASSWORD=password
 MONGODB_URI=mongodb://username:password@mongo:27017/stock_data?authSource=admin
-
-
-TIMEZONE=Asia/Seoul
-CHECK_HOUR=7
 ```
 
 ### Installation and Setup
@@ -120,9 +118,17 @@ stock-bot/
 ## How It Works
 
 1. **Initialization**: The application loads configuration from environment variables and connects to MongoDB.
-2. **Scheduler**: A ticker runs every 15 minutes to check if actions need to be taken.
-3. **Daily Report**: At the configured time (default: 7 AM), the system fetches current prices for all stocks and sends a summary.
-4. **Real-time Monitoring**: During market hours, the system checks prices every 30 minutes and compares them with previous closing prices.
-5. **Alerts**: If a price change exceeds the threshold (default: 5%), an alert is sent (limited to once per day per stock).
+2. **Initial Price Check**: On startup, the system performs an initial price check to verify connectivity and functionality.
+3. **Scheduler**: A ticker runs every 15 minutes to check if actions need to be taken.
+4. **Daily Report**: At the configured time (default: 7 AM), the system fetches current prices for all stocks and sends a summary.
+5. **Real-time Monitoring**: During market hours, the system checks prices every 30 minutes and compares them with previous closing prices.
+6. **Alerts**: If a price change exceeds the threshold (default: 5%), an alert is sent (limited to once per day per stock).
+7. **Graceful Shutdown**: The application properly cleans up resources, including browser instances, when terminated.
 
+## Error Handling
 
+The application includes robust error handling:
+
+- **Browser Timeouts**: Automatically retries when browser operations time out
+- **Connection Issues**: Implements retry logic for network-related failures
+- **Resource Management**: Properly cleans up browser resources to prevent memory leaks
